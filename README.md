@@ -9,6 +9,7 @@ This project demonstrates real-time speech-to-text transcription using OpenAI's 
 ## Features
 
 - Real-time audio transcription from microphone input
+- Batch mode for efficient API usage (recommended for Azure OpenAI API)
 - Supports multiple Whisper model sizes (tiny, base, small, medium, large)
 - Adjustable sensitivity for speech detection
 - Configurable timing parameters for real-time behavior
@@ -71,11 +72,19 @@ This project uses a YAML configuration file for settings. For security reasons, 
      language: "en-US"
    ```
 
-3. Customize other settings as needed (hotkeys, behavior, audio parameters)
+3. Set batch mode (recommended for Azure API):
+    ```yaml
+    behavior:
+      batch_mode: true  # Process audio only after recording completes
+    ```
+
+4. Customize other settings as needed (hotkeys, behavior, audio parameters)
 
 > **Security Note**: Never commit your `config.yaml` file with real API keys to version control. The file is included in `.gitignore` to help prevent accidental exposure of your credentials.
 
-For detailed setup instructions, see [AZURE_SETUP.md](docs/AZURE_SETUP.md).
+For detailed setup instructions, see:
+- [Azure API Setup](docs/AZURE_SETUP.md)
+- [Batch Mode Documentation](docs/BATCH_MODE.md)
 
 ## Usage
 

@@ -11,6 +11,7 @@ hotkeys:
 behavior:
   append_to_clipboard: true  # Whether to append to existing clipboard content
   auto_paste: true  # Whether to automatically paste transcription
+  batch_mode: true  # Whether to only transcribe after recording is complete (recommended for Azure API limits)
 
 audio:
   sample_rate: 16000  # Audio sample rate in Hz

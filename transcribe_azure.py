@@ -43,9 +43,13 @@ class AzureTranscriber:
         self.phrase_timeout = self.config['audio']['phrase_timeout']
         self.sample_rate = self.config['audio']['sample_rate']
         
+        # Behavior settings
+        self.batch_mode = self.config.get('behavior', {}).get('batch_mode', True)
+        
         # Rate limiting buffer settings - calculated based on Azure limitations
         self.buffer_size_seconds = 60 / self.azure_client.MAX_REQUESTS_PER_MINUTE
         logger.info(f"Using buffer size of {self.buffer_size_seconds:.1f} seconds to optimize API usage")
+        logger.info(f"Batch mode {'enabled' if self.batch_mode else 'disabled'}")
         
         # Recording state
         self.is_recording = False
@@ -111,10 +115,12 @@ class AzureTranscriber:
                 phrase_time_limit=self.record_timeout
             )
             
-            # Start processing thread
-            self.recording_thread = threading.Thread(target=self._process_audio)
-            self.recording_thread.daemon = True
-            self.recording_thread.start()
+            # Only start processing thread for real-time mode
+            if not self.batch_mode:
+                # Start processing thread
+                self.recording_thread = threading.Thread(target=self._process_audio)
+                self.recording_thread.daemon = True
+                self.recording_thread.start()
             
             return None
             
@@ -128,9 +134,39 @@ class AzureTranscriber:
             if hasattr(self, 'listener'):
                 self.listener(wait_for_stop=False)
                 
-            # Wait for processing to complete
-            if self.recording_thread and self.recording_thread.is_alive():
+            # Wait for processing to complete if not in batch mode
+            if not self.batch_mode and self.recording_thread and self.recording_thread.is_alive():
                 self.recording_thread.join(timeout=2.0)
+            
+            # In batch mode, process all audio when recording stops
+            if self.batch_mode:
+                # Get all accumulated audio data
+                audio_data = self._get_all_audio_data()
+                
+                if len(audio_data) > 0:
+                    audio_size_mb = len(audio_data) / 1024 / 1024
+                    audio_duration = len(audio_data) / 2 / self.sample_rate  # 16-bit = 2 bytes per sample
+                    
+                    logger.info(f"Processing {audio_size_mb:.2f}MB of audio in batch mode ({audio_duration:.1f} seconds)")
+                    
+                    try:
+                        # Convert to numpy array
+                        audio_np = np.frombuffer(audio_data, dtype=np.int16)
+                        
+                        # Transcribe the entire recording
+                        transcript = self.azure_client.transcribe_audio(audio_np, self.sample_rate)
+                        
+                        if transcript:
+                            logger.info(f"Transcription: {transcript}")
+                            self.transcription = [transcript]
+                            
+                            # Handle clipboard operations
+                            if self.config.get('behavior', {}).get('append_to_clipboard', False):
+                                self._update_clipboard(transcript)
+                    except Exception as e:
+                        logger.error(f"Error in batch processing: {str(e)}")
+                else:
+                    logger.warning("No audio data to process")
                 
             # Return the final transcription
             return ' '.join(self.transcription).strip()
@@ -138,7 +174,7 @@ class AzureTranscriber:
         return None
             
     def _process_audio(self):
-        """Process audio data and get transcriptions"""
+        """Process audio data and get transcriptions - only used in real-time mode"""
         while not self.stop_recording.is_set():
             now = datetime.utcnow()
             
@@ -174,12 +210,12 @@ class AzureTranscriber:
                 
                 if should_transcribe:
                     # Convert audio data to numpy array
-                    audio_np = np.frombuffer(self.current_audio_data, dtype=np.int16).astype(np.float32) / 32768.0
+                    audio_np = np.frombuffer(self.current_audio_data, dtype=np.int16)
                     
                     # Transcribe audio
                     logger.info(f"Transcribing {audio_size_mb:.2f}MB of audio "
                               f"({self.accumulated_audio_time:.1f} seconds)")
-                    text = self.azure_client.transcribe_audio(audio_np)
+                    text = self.azure_client.transcribe_audio(audio_np, self.sample_rate)
                     self.last_api_call_time = time.time()
                     
                     # Reset accumulated audio time
@@ -206,7 +242,39 @@ class AzureTranscriber:
                     
             # Prevent CPU hogging
             time.sleep(0.1)
-
+            
+    def _get_all_audio_data(self):
+        """Collect all audio data from the queue"""
+        audio_data = self.current_audio_data
+        
+        # Get remaining audio from queue
+        while not self.data_queue.empty():
+            data = self.data_queue.get()
+            audio_data += data
+            
+        return audio_data
+        
+    def _update_clipboard(self, text):
+        """Update clipboard with transcription"""
+        try:
+            if self.config.get('behavior', {}).get('append_to_clipboard', False):
+                import pyperclip
+                
+                if self.config.get('behavior', {}).get('auto_paste', False):
+                    # Automatically paste the text
+                    current = pyperclip.paste()
+                    if current:
+                        pyperclip.copy(current + " " + text)
+                    else:
+                        pyperclip.copy(text)
+                    logger.info(f"Updated clipboard with transcription")
+                else:
+                    # Just copy the text
+                    pyperclip.copy(text)
+                    logger.info(f"Copied transcription to clipboard")
+        except Exception as e:
+            logger.error(f"Error updating clipboard: {str(e)}")
+            
 def main():
     parser = argparse.ArgumentParser(description="Real-time Azure Whisper Transcription")
     parser.add_argument('--config', default='config.yaml', help='Path to config file')
