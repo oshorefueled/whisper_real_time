@@ -1,7 +1,11 @@
 setuptools
 pyaudio
 SpeechRecognition
---extra-index-url https://download.pytorch.org/whl/cu116
-torch
 numpy
-git+https://github.com/openai/whisper.git
+pynput>=1.8.1
+pyperclip>=1.9.0
+pyyaml
+requests
+
+# Optional: Only needed if using Azure Cognitive Services API directly
+# azure-cognitiveservices-speech

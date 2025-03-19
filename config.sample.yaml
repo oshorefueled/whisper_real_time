@@ -1,0 +1,19 @@
+azure:
+  api_key: "your-azure-api-key"  # Replace with your Azure OpenAI API key
+  endpoint: "https://your-resource-name.openai.azure.com"  # Replace with your endpoint URL
+  deployment_name: "whisper"  # The name you gave to your Whisper model deployment
+  api_version: "2024-06-01"  # API version for Azure OpenAI
+  language: "en-US"  # The language code for transcription
+
+hotkeys:
+  start_stop: "ctrl+alt+d"  # On macOS, you might prefer "cmd+alt+d"
+
+behavior:
+  append_to_clipboard: true  # Whether to append to existing clipboard content
+  auto_paste: true  # Whether to automatically paste transcription
+
+audio:
+  sample_rate: 16000  # Audio sample rate in Hz
+  energy_threshold: 1000  # Energy level for mic to detect
+  record_timeout: 2.0  # How real time the recording is in seconds
+  phrase_timeout: 3.0  # How much empty space between recordings before new line
