@@ -21,11 +21,13 @@ When Batch Mode is enabled:
 2. No API requests are made during recording
 3. When you stop recording (by pressing the hotkey again), all recorded audio is sent as a single request to the API
 4. The transcription is returned as a complete text and copied to your clipboard
+5. If auto-paste is enabled, the text is automatically pasted at your cursor position
 
 This approach ensures:
 - Maximum efficiency of API usage
 - No rate limit errors during extended recording sessions
 - Better transcription quality as the API has more context
+- Clean clipboard handling without text duplication
 
 ## Configuration
 
@@ -34,11 +36,15 @@ To enable or disable Batch Mode, edit your `config.yaml` file:
 ```yaml
 behavior:
   batch_mode: true  # Set to false if you want to attempt real-time transcription
+  append_to_clipboard: true  # Controls whether transcriptions are copied to clipboard
+  auto_paste: true  # Controls whether to automatically paste after transcription
 ```
 
 ## Best Practices
 
 - **Keep recordings under 25MB**: While the system will truncate audio if it exceeds the maximum size, it's best to keep individual recording sessions reasonably short.
+- **Use batch mode for longer dictations**: Batch mode is ideal for longer dictations where you don't need to see the text in real-time.
+- **Check clipboard before pasting**: If you've disabled auto-paste, remember that the transcription is still in your clipboard and can be pasted with Cmd+V (Mac) or Ctrl+V (Windows/Linux).
 - **Wait between recordings**: Remember that even with Batch Mode, you're still limited to 3 API requests per minute.
 - **Use for dictation**: Batch Mode is ideal for dictation or transcribing pre-recorded content, rather than live conversations.
 
