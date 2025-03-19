@@ -11,6 +11,7 @@ import logging
 from datetime import datetime, timedelta
 from queue import Queue
 from sys import platform
+import sys
 
 from azure_whisper_client import AzureWhisperClient
 from keyboard_listener import HotkeyManager
@@ -96,7 +97,15 @@ class AzureTranscriber:
             self.accumulated_audio_time += self.record_timeout
             
     def start_stop_recording(self, start):
-        """Start or stop recording based on hotkey press"""
+        """Start or stop recording based on hotkey press
+        
+        Args:
+            start (bool): True to start recording, False to stop
+            
+        Returns:
+            tuple: When stopping, returns (transcript, batch_mode_active) tuple
+                  When starting, returns None
+        """
         if start and not self.is_recording:
             # Start recording
             self.is_recording = True
@@ -139,6 +148,7 @@ class AzureTranscriber:
                 self.recording_thread.join(timeout=2.0)
             
             # In batch mode, process all audio when recording stops
+            last_transcript = None
             if self.batch_mode:
                 # Get all accumulated audio data
                 audio_data = self._get_all_audio_data()
@@ -159,17 +169,18 @@ class AzureTranscriber:
                         if transcript:
                             logger.info(f"Transcription: {transcript}")
                             self.transcription = [transcript]
+                            last_transcript = transcript
                             
                             # Handle clipboard operations
                             if self.config.get('behavior', {}).get('append_to_clipboard', False):
-                                self._update_clipboard(transcript)
+                                self._update_clipboard(transcript, replace=True)
                     except Exception as e:
                         logger.error(f"Error in batch processing: {str(e)}")
                 else:
                     logger.warning("No audio data to process")
-                
-            # Return the final transcription
-            return ' '.join(self.transcription).strip()
+            
+            # Return the transcript and whether batch mode is active
+            return (last_transcript, self.batch_mode) if last_transcript else (None, self.batch_mode)
         
         return None
             
@@ -227,6 +238,10 @@ class AzureTranscriber:
                     else:
                         self.transcription[-1] = text
                     
+                    # Handle clipboard update if enabled
+                    if phrase_complete and self.config.get('behavior', {}).get('append_to_clipboard', False):
+                        self._update_clipboard(text, replace=False)
+                    
                     # Clear audio buffer after successful transcription
                     self.current_audio_data = b''
                     
@@ -236,8 +251,11 @@ class AzureTranscriber:
                 print(f"Buffer: {audio_size_mb:.2f}MB / {self.accumulated_audio_time:.1f}s")
                 print(f"API calls available: {min(3, 3 - len(self.azure_client.request_timestamps))}/3 per minute")
                 print("\nTranscription:")
-                for line in self.transcription:
-                    print(line)
+                for i, line in enumerate(self.transcription):
+                    if i == len(self.transcription) - 1:
+                        print(line, end='', flush=True)
+                    else:
+                        print(line)
                 print('', end='', flush=True)
                     
             # Prevent CPU hogging
@@ -254,24 +272,61 @@ class AzureTranscriber:
             
         return audio_data
         
-    def _update_clipboard(self, text):
-        """Update clipboard with transcription"""
+    def _update_clipboard(self, text, replace=False):
+        """Update clipboard with transcription
+        
+        Args:
+            text (str): Text to add to clipboard
+            replace (bool): If True, replace existing clipboard content instead of appending
+        """
         try:
+            import pyperclip
+            from pynput.keyboard import Key, Controller
+            
+            keyboard = Controller()
+            
             if self.config.get('behavior', {}).get('append_to_clipboard', False):
-                import pyperclip
-                
-                if self.config.get('behavior', {}).get('auto_paste', False):
-                    # Automatically paste the text
+                # Handle clipboard operations
+                if replace:
+                    # Only copy, don't append
+                    pyperclip.copy(text)
+                    logger.info(f"Copied transcription to clipboard: {text[:30]}...")
+                else:
                     current = pyperclip.paste()
-                    if current:
-                        pyperclip.copy(current + " " + text)
+                    if current and current != text:  # Prevent duplication
+                        # Check if text is already at the end of current to avoid duplication
+                        if not current.endswith(text):
+                            pyperclip.copy(current + " " + text)
+                            logger.info(f"Updated clipboard with transcription: {text[:30]}...")
+                        else:
+                            # Text is already in clipboard, no need to append
+                            logger.info(f"Text already in clipboard, skipping update")
                     else:
                         pyperclip.copy(text)
-                    logger.info(f"Updated clipboard with transcription")
-                else:
-                    # Just copy the text
-                    pyperclip.copy(text)
-                    logger.info(f"Copied transcription to clipboard")
+                        logger.info(f"Copied transcription to clipboard: {text[:30]}...")
+                
+                # Handle auto-paste if enabled
+                if self.config.get('behavior', {}).get('auto_paste', False):
+                    # Give the system a moment to update the clipboard
+                    time.sleep(0.1)
+                    
+                    # Use keyboard to simulate Ctrl+V (or Command+V on macOS)
+                    if sys.platform == 'darwin':  # macOS
+                        keyboard.press(Key.cmd)
+                        keyboard.press('v')
+                        keyboard.release('v')
+                        keyboard.release(Key.cmd)
+                    else:  # Windows/Linux
+                        keyboard.press(Key.ctrl)
+                        keyboard.press('v')
+                        keyboard.release('v')
+                        keyboard.release(Key.ctrl)
+                    
+                    logger.info(f"Auto-pasted transcription")
+                
+                # Print confirmation message
+                print(f"Transcription: {text}")
+                    
         except Exception as e:
             logger.error(f"Error updating clipboard: {str(e)}")
             

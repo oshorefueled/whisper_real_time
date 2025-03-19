@@ -82,6 +82,7 @@ hotkeys:
 behavior:
   append_to_clipboard: true
   auto_paste: true
+  batch_mode: true  # New batch mode setting
 
 audio:
   sample_rate: 16000
@@ -148,6 +149,10 @@ To work within these limitations while providing a seamless user experience, our
    - Accumulated audio time
    - Available API calls within the rate limit
    - Current transcription status
+
+### Batch Mode Processing
+
+The latest addition to the implementation is batch mode processing. This feature allows users to process audio after recording stops, optimizing API usage by making a single request per recording. The batch mode is configurable via the `batch_mode` setting in config.yaml.
 
 ### Mac Compatibility
 

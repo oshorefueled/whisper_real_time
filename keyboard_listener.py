@@ -101,7 +101,14 @@ class HotkeyManager:
                 print("Recording stopped...")
                 if self.transcription_callback:
                     result = self.transcription_callback(False)
-                    if result and self.config['behavior']['append_to_clipboard']:
+                    # Handle the new return value format with batch mode info
+                    if result and isinstance(result, tuple) and len(result) == 2:
+                        transcript, batch_mode_active = result
+                        # Only handle clipboard if batch mode is not active (to avoid duplication)
+                        if transcript and self.config['behavior']['append_to_clipboard'] and not batch_mode_active:
+                            self._handle_transcription_result(transcript)
+                    # For backward compatibility with old format
+                    elif result and self.config['behavior']['append_to_clipboard']:
                         self._handle_transcription_result(result)
     
     def _on_release(self, key):
