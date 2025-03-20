@@ -54,8 +54,11 @@ class AzureWhisperClient:
 
     def _check_rate_limit(self):
         """
-        Check if we're within rate limits, and if not, wait until we can make another request
-        Returns: Seconds to wait before making request (0 if no wait needed)
+        Check if we're within rate limits, and if not, calculate wait time
+        Returns: 
+            tuple: (wait_time, requests_available)
+                - wait_time: Seconds to wait before making request (0 if no wait needed)
+                - requests_available: Number of requests available in current minute
         """
         with self.request_lock:
             # Remove timestamps older than 1 minute
@@ -63,14 +66,17 @@ class AzureWhisperClient:
             self.request_timestamps = [ts for ts in self.request_timestamps 
                                      if current_time - ts < 60]
             
-            # If we haven't hit the rate limit, return 0 (no wait needed)
-            if len(self.request_timestamps) < self.MAX_REQUESTS_PER_MINUTE:
-                return 0
+            # Calculate requests available
+            requests_available = self.MAX_REQUESTS_PER_MINUTE - len(self.request_timestamps)
+            
+            # If we haven't hit the rate limit, return 0 wait time
+            if requests_available > 0:
+                return 0, requests_available
             
             # Calculate time to wait until oldest timestamp is 60 seconds old
             wait_time = 60 - (current_time - self.request_timestamps[0])
-            return max(0, wait_time)
-    
+            return max(0, wait_time), 0
+
     def _record_request(self):
         """Record that a request was made for rate limiting purposes"""
         with self.request_lock:
@@ -85,8 +91,18 @@ class AzureWhisperClient:
             sample_rate (int): Sample rate of audio data
             
         Returns:
-            str: Transcription result
+            dict: {
+                'text': Transcription result,
+                'wait_time': Time spent waiting for rate limit (seconds),
+                'status': 'success', 'rate_limited', or 'error'
+            }
         """
+        result = {
+            'text': '',
+            'wait_time': 0,
+            'status': 'success'
+        }
+        
         try:
             # Check audio size
             audio_size_bytes = len(audio_data) * 2  # 16-bit audio = 2 bytes per sample
@@ -108,10 +124,14 @@ class AzureWhisperClient:
                     wf.writeframes(audio_data.tobytes())
                 
                 # Check rate limiting
-                wait_time = self._check_rate_limit()
+                wait_time, requests_available = self._check_rate_limit()
                 if wait_time > 0:
-                    logger.warning(f"Rate limit reached. Waiting {wait_time:.1f} seconds before making request.")
-                    time.sleep(wait_time)
+                    logger.warning(f"Rate limit reached. Will wait {wait_time:.1f} seconds before making request.")
+                    result['status'] = 'rate_limited'
+                    result['wait_time'] = wait_time
+                    
+                    # Return immediately if the caller wants to handle waiting
+                    return result
                     
                 logger.info(f"Sending {audio_size_mb:.2f}MB audio to Azure OpenAI Whisper API")
                 
@@ -152,21 +172,87 @@ class AzureWhisperClient:
                 )
                 
                 response.raise_for_status()  # Raise exception for HTTP errors
-                result = response.json()
+                response_json = response.json()
                 
                 # Extract transcription from the response
-                if 'text' in result:
-                    return result['text']
+                if 'text' in response_json:
+                    result['text'] = response_json['text']
+                    return result
                 else:
-                    logger.warning(f"Unexpected response format: {result}")
-                    return ""
+                    logger.warning(f"Unexpected response format: {response_json}")
+                    result['status'] = 'error'
+                    return result
                 
         except requests.exceptions.RequestException as e:
             logger.error(f"Error calling Azure OpenAI API: {e}")
             if hasattr(e, 'response') and e.response is not None:
                 logger.error(f"Response status: {e.response.status_code}")
                 logger.error(f"Response content: {e.response.text}")
-            return ""
+            result['status'] = 'error'
+            
+        return result
+
+    def transcribe_when_available(self, audio_data, sample_rate=16000, callback=None, max_wait=300):
+        """
+        Queue transcription to run when API is available
+        
+        Args:
+            audio_data (numpy.ndarray): Audio data as numpy array
+            sample_rate (int): Sample rate of audio data
+            callback (function): Function to call with result when complete
+            max_wait (int): Maximum seconds to wait before giving up
+            
+        Returns:
+            str: Job ID for tracking transcription
+        """
+        import uuid
+        import threading
+        
+        job_id = str(uuid.uuid4())
+        
+        def _process_job():
+            wait_total = 0
+            while wait_total < max_wait:
+                result = self.transcribe_audio(audio_data, sample_rate)
+                
+                if result['status'] != 'rate_limited':
+                    # Transcription complete or error
+                    if callback:
+                        callback(result)
+                    return
+                    
+                # Need to wait - notify callback of waiting status
+                if callback:
+                    callback({
+                        'status': 'waiting',
+                        'wait_time': result['wait_time'],
+                        'job_id': job_id,
+                        'text': ''
+                    })
+                
+                # Non-blocking wait by sleeping in small increments
+                wait_increment = 0.5  # Update progress every 0.5 seconds
+                wait_remaining = result['wait_time']
+                
+                while wait_remaining > 0:
+                    sleep_time = min(wait_increment, wait_remaining)
+                    time.sleep(sleep_time)
+                    wait_remaining -= sleep_time
+                    wait_total += sleep_time
+                    
+                    # Update progress if callback provided
+                    if callback:
+                        callback({
+                            'status': 'progress',
+                            'wait_time': result['wait_time'],
+                            'wait_remaining': wait_remaining,
+                            'job_id': job_id,
+                            'text': ''
+                        })
+        
+        # Start processing thread
+        threading.Thread(target=_process_job, daemon=True).start()
+        return job_id
 
     def _numpy_to_temp_wav_file(self, audio_np, sample_rate):
         """Convert numpy array to a temporary WAV file and return the file object"""

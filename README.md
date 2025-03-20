@@ -10,6 +10,8 @@ This project demonstrates real-time speech-to-text transcription using OpenAI's 
 
 - Real-time audio transcription from microphone input
 - Batch mode for efficient API usage (recommended for Azure OpenAI API)
+- Advanced rate limit handling with visual feedback and queue system
+- Non-blocking transcription with progress indicators
 - Supports multiple Whisper model sizes (tiny, base, small, medium, large)
 - Adjustable sensitivity for speech detection
 - Configurable timing parameters for real-time behavior
@@ -85,6 +87,27 @@ This project uses a YAML configuration file for settings. For security reasons, 
 For detailed setup instructions, see:
 - [Azure API Setup](docs/AZURE_SETUP.md)
 - [Batch Mode Documentation](docs/BATCH_MODE.md)
+
+## Rate Limiting and Queue System
+
+The application includes an advanced rate limiting system to handle the Azure Whisper API's limit of 3 requests per minute:
+
+- Visual progress bars show wait time during rate limiting
+- Transcription queue system processes recordings in the background
+- Non-blocking API calls allow the UI to remain responsive
+- Status updates show queue position and estimated completion time
+
+To test the rate limiting UI:
+
+```
+python test_rate_limit_ui.py
+```
+
+To test the queue system:
+
+```
+python test_rate_limit_ui.py --test queue
+```
 
 ## Usage
 
