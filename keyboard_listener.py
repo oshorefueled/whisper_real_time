@@ -37,6 +37,10 @@ class HotkeyManager:
         self.is_recording = False
         self.listener = None
         
+        # Batch mode transcription tracking
+        self.waiting_for_batch_result = False
+        self.batch_job_id = None
+        
     def _parse_hotkey(self, hotkey_str):
         """Parse a string like 'ctrl+alt+d' into keyboard keys"""
         keys = []
@@ -100,13 +104,38 @@ class HotkeyManager:
             else:
                 print("Recording stopped...")
                 if self.transcription_callback:
+                    # Reset batch mode tracking
+                    self.waiting_for_batch_result = False
+                    self.batch_job_id = None
+                    
+                    # Define a completion callback for batch mode
+                    def batch_transcription_complete(transcript):
+                        if self.waiting_for_batch_result and transcript:
+                            print(f"Batch transcription complete: {transcript[:30]}...")
+                            if self.config['behavior']['append_to_clipboard']:
+                                self._handle_transcription_result(transcript)
+                            self.waiting_for_batch_result = False
+                    
+                    # Get the transcriber instance to set our callback
+                    transcriber = self.transcription_callback.__self__
+                    transcriber.transcription_complete_callback = batch_transcription_complete
+                    
+                    # Call the transcription callback to stop recording
                     result = self.transcription_callback(False)
+                    
                     # Handle the new return value format with batch mode info
                     if result and isinstance(result, tuple) and len(result) == 2:
                         transcript, batch_mode_active = result
+                        
+                        if transcript == "Processing..." and batch_mode_active:
+                            # We're in batch mode and waiting for processing
+                            self.waiting_for_batch_result = True
+                            print("Waiting for batch transcription to complete...")
                         # Only handle clipboard if batch mode is not active (to avoid duplication)
-                        if transcript and self.config['behavior']['append_to_clipboard'] and not batch_mode_active:
+                        # And if transcript is not "Processing..." placeholder
+                        elif transcript and transcript != "Processing..." and self.config['behavior']['append_to_clipboard'] and not batch_mode_active:
                             self._handle_transcription_result(transcript)
+                            
                     # For backward compatibility with old format
                     elif result and self.config['behavior']['append_to_clipboard']:
                         self._handle_transcription_result(result)

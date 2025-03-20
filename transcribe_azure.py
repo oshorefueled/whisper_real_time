@@ -8,13 +8,16 @@ import speech_recognition as sr
 import threading
 import time
 import logging
+import uuid
 from datetime import datetime, timedelta
 from queue import Queue
 from sys import platform
 import sys
+from collections import deque
 
 from azure_whisper_client import AzureWhisperClient
 from keyboard_listener import HotkeyManager
+from utils.progress_bar import create_progress_bar
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -61,6 +64,17 @@ class AzureTranscriber:
         self.last_api_call_time = 0
         self.accumulated_audio_time = 0
         
+        # Transcription queue
+        self.transcription_queue = deque()
+        self.queue_lock = threading.Lock()
+        self.queue_event = threading.Event()
+        self.queue_thread = None
+        self.next_job_id = 1
+        self.current_status = None
+        
+        # Callback for completed transcriptions
+        self.transcription_complete_callback = None
+        
         # Initialize recorder
         self.recorder = sr.Recognizer()
         self.recorder.energy_threshold = self.energy_threshold
@@ -72,6 +86,9 @@ class AzureTranscriber:
         # Recording thread
         self.recording_thread = None
         self.stop_recording = threading.Event()
+        
+        # Start queue processor thread
+        self._start_queue_processor()
         
     def _setup_microphone(self):
         """Setup the microphone source"""
@@ -96,6 +113,127 @@ class AzureTranscriber:
             self.data_queue.put(data)
             self.accumulated_audio_time += self.record_timeout
             
+    def _start_queue_processor(self):
+        """Start the background thread that processes the transcription queue"""
+        def _process_queue():
+            while True:
+                # Wait for items in the queue
+                if not self.transcription_queue:
+                    self.queue_event.clear()
+                    self.queue_event.wait()
+                
+                # Get the next job if available
+                job = None
+                with self.queue_lock:
+                    if self.transcription_queue:
+                        job = self.transcription_queue[0]
+                        # Don't remove yet - keep until processed
+                
+                if job:
+                    # Process the job
+                    self.current_status = {
+                        'job_id': job['job_id'],
+                        'status': 'processing',
+                        'message': f"Processing recording {job['job_id']} ({job['audio_size_mb']:.2f}MB)"
+                    }
+                    self._update_display()
+                    
+                    # Non-blocking transcription with status updates
+                    def _transcription_callback(result):
+                        if result['status'] == 'success':
+                            # Transcription successful
+                            job['transcript'] = result['text']
+                            self.current_status = {
+                                'job_id': job['job_id'],
+                                'status': 'complete',
+                                'message': f"Transcription complete"
+                            }
+                            
+                            # Update display and handle clipboard
+                            if job['transcript']:
+                                self.transcription[-1] = job['transcript']
+                                if self.config.get('behavior', {}).get('append_to_clipboard', False):
+                                    self._update_clipboard(job['transcript'], replace=job.get('replace_clipboard', False))
+                                
+                                # Notify callback if this is a batch mode job
+                                if job.get('batch_mode_job', False) and self.transcription_complete_callback:
+                                    self.transcription_complete_callback(job['transcript'])
+                            
+                            # Remove job from queue
+                            with self.queue_lock:
+                                if self.transcription_queue and self.transcription_queue[0]['job_id'] == job['job_id']:
+                                    self.transcription_queue.popleft()
+                        
+                        elif result['status'] == 'waiting':
+                            # Rate limit hit - update status
+                            self.current_status = {
+                                'job_id': job['job_id'],
+                                'status': 'waiting',
+                                'message': f"Rate limit reached. Waiting {result['wait_time']:.1f} seconds...",
+                                'wait_time': result['wait_time'],
+                                'wait_remaining': result['wait_time']
+                            }
+                        
+                        elif result['status'] == 'progress':
+                            # Update wait progress
+                            self.current_status = {
+                                'job_id': job['job_id'],
+                                'status': 'waiting',
+                                'message': f"Rate limit reached. Waiting {result['wait_remaining']:.1f} more seconds...",
+                                'wait_time': result['wait_time'],
+                                'wait_remaining': result['wait_remaining'],
+                                'progress': 1 - (result['wait_remaining'] / result['wait_time'])
+                            }
+                        
+                        self._update_display()
+                    
+                    # Start transcription when available
+                    self.azure_client.transcribe_when_available(
+                        job['audio_np'], 
+                        self.sample_rate,
+                        callback=_transcription_callback
+                    )
+                    
+                    # Wait for completion
+                    while True:
+                        # Check if job is still in queue
+                        with self.queue_lock:
+                            if not self.transcription_queue or self.transcription_queue[0]['job_id'] != job['job_id']:
+                                break
+                        time.sleep(0.5)
+                
+                time.sleep(0.1)  # Prevent CPU hogging
+        
+        self.queue_thread = threading.Thread(target=_process_queue, daemon=True)
+        self.queue_thread.start()
+
+    def _add_to_queue(self, audio_np, replace_clipboard=False, batch_mode_job=False):
+        """Add audio to transcription queue"""
+        audio_size_bytes = len(audio_np) * 2  # 16-bit audio = 2 bytes per sample
+        audio_size_mb = audio_size_bytes / (1024 * 1024)
+        audio_duration = len(audio_np) / self.sample_rate
+        
+        job = {
+            'job_id': self.next_job_id,
+            'audio_np': audio_np,
+            'timestamp': time.time(),
+            'audio_size_mb': audio_size_mb,
+            'audio_duration': audio_duration,
+            'replace_clipboard': replace_clipboard,
+            'batch_mode_job': batch_mode_job,
+            'transcript': None
+        }
+        
+        self.next_job_id += 1
+        
+        with self.queue_lock:
+            self.transcription_queue.append(job)
+            
+        # Signal queue processor that new job is available
+        self.queue_event.set()
+        
+        return job['job_id']
+
     def start_stop_recording(self, start):
         """Start or stop recording based on hotkey press
         
@@ -131,6 +269,9 @@ class AzureTranscriber:
                 self.recording_thread.daemon = True
                 self.recording_thread.start()
             
+            # Update display
+            self._update_display()
+            
             return None
             
         elif not start and self.is_recording:
@@ -163,27 +304,34 @@ class AzureTranscriber:
                         # Convert to numpy array
                         audio_np = np.frombuffer(audio_data, dtype=np.int16)
                         
-                        # Transcribe the entire recording
-                        transcript = self.azure_client.transcribe_audio(audio_np, self.sample_rate)
+                        logger.info(f"Adding {audio_size_mb:.2f}MB of audio to queue")
                         
-                        if transcript:
-                            logger.info(f"Transcription: {transcript}")
-                            self.transcription = [transcript]
-                            last_transcript = transcript
-                            
-                            # Handle clipboard operations
-                            if self.config.get('behavior', {}).get('append_to_clipboard', False):
-                                self._update_clipboard(transcript, replace=True)
+                        # Add to transcription queue instead of processing immediately
+                        job_id = self._add_to_queue(audio_np, replace_clipboard=True, batch_mode_job=True)
+                        
+                        # Update display with status
+                        self.current_status = {
+                            'job_id': job_id,
+                            'status': 'queued',
+                            'message': f"Added recording to transcription queue (Job {job_id})"
+                        }
+                        self._update_display()
+                        
+                        # Return placeholder - actual transcription will be handled by queue
+                        return ("Processing...", self.batch_mode)
                     except Exception as e:
                         logger.error(f"Error in batch processing: {str(e)}")
                 else:
                     logger.warning("No audio data to process")
             
+            # Update display
+            self._update_display()
+            
             # Return the transcript and whether batch mode is active
             return (last_transcript, self.batch_mode) if last_transcript else (None, self.batch_mode)
         
         return None
-            
+
     def _process_audio(self):
         """Process audio data and get transcriptions - only used in real-time mode"""
         while not self.stop_recording.is_set():
@@ -223,44 +371,23 @@ class AzureTranscriber:
                     # Convert audio data to numpy array
                     audio_np = np.frombuffer(self.current_audio_data, dtype=np.int16)
                     
-                    # Transcribe audio
-                    logger.info(f"Transcribing {audio_size_mb:.2f}MB of audio "
+                    # Add to transcription queue instead of processing immediately
+                    logger.info(f"Adding {audio_size_mb:.2f}MB of audio to queue "
                               f"({self.accumulated_audio_time:.1f} seconds)")
-                    text = self.azure_client.transcribe_audio(audio_np, self.sample_rate)
-                    self.last_api_call_time = time.time()
+                    job_id = self._add_to_queue(audio_np, replace_clipboard=False)
                     
                     # Reset accumulated audio time
                     self.accumulated_audio_time = 0
                     
-                    # Update transcription
-                    if phrase_complete:
-                        self.transcription.append(text)
-                    else:
-                        self.transcription[-1] = text
-                    
-                    # Handle clipboard update if enabled
-                    if phrase_complete and self.config.get('behavior', {}).get('append_to_clipboard', False):
-                        self._update_clipboard(text, replace=False)
-                    
-                    # Clear audio buffer after successful transcription
+                    # Clear audio buffer after adding to queue
                     self.current_audio_data = b''
-                    
-                # Print current transcription status
-                os.system('cls' if os.name=='nt' else 'clear')
-                print("Recording in progress...")
-                print(f"Buffer: {audio_size_mb:.2f}MB / {self.accumulated_audio_time:.1f}s")
-                print(f"API calls available: {min(3, 3 - len(self.azure_client.request_timestamps))}/3 per minute")
-                print("\nTranscription:")
-                for i, line in enumerate(self.transcription):
-                    if i == len(self.transcription) - 1:
-                        print(line, end='', flush=True)
-                    else:
-                        print(line)
-                print('', end='', flush=True)
+                
+                # Update display
+                self._update_display()
                     
             # Prevent CPU hogging
             time.sleep(0.1)
-            
+
     def _get_all_audio_data(self):
         """Collect all audio data from the queue"""
         audio_data = self.current_audio_data
@@ -330,6 +457,46 @@ class AzureTranscriber:
         except Exception as e:
             logger.error(f"Error updating clipboard: {str(e)}")
             
+    def _update_display(self):
+        """Update terminal display with current status"""
+        os.system('cls' if os.name=='nt' else 'clear')
+        
+        if self.is_recording:
+            print("⚫ Recording in progress...")
+            audio_size_bytes = len(self.current_audio_data)
+            audio_size_mb = audio_size_bytes / (1024 * 1024)
+            print(f"Buffer: {audio_size_mb:.2f}MB / {self.accumulated_audio_time:.1f}s")
+        else:
+            print("● Recording stopped")
+        
+        # Show API status
+        print(f"API calls available: {min(3, 3 - len(self.azure_client.request_timestamps))}/3 per minute")
+        
+        # Show queue status
+        if self.transcription_queue:
+            print(f"\n📋 Transcription Queue: {len(self.transcription_queue)} items")
+            for i, job in enumerate(self.transcription_queue):
+                print(f"  {i+1}. Job {job['job_id']}: {job['audio_size_mb']:.2f}MB ({job['audio_duration']:.1f}s)")
+        
+        # Show current status
+        if self.current_status:
+            print(f"\n📊 Status: {self.current_status['message']}")
+            
+            # Show progress bar for waiting
+            if self.current_status['status'] == 'waiting' and 'progress' in self.current_status:
+                progress = self.current_status['progress']
+                bar = create_progress_bar(progress)
+                print(f"  Progress: {bar}")
+        
+        # Show transcription
+        print("\n📝 Transcription:")
+        for i, line in enumerate(self.transcription):
+            if i == len(self.transcription) - 1:
+                print(line, end='', flush=True)
+            else:
+                print(line)
+        print('', end='', flush=True)
+
 def main():
     parser = argparse.ArgumentParser(description="Real-time Azure Whisper Transcription")
     parser.add_argument('--config', default='config.yaml', help='Path to config file')
