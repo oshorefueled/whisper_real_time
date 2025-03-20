@@ -44,3 +44,6 @@ Thumbs.db
 # Temporary files
 temp/
 tmp/
+
+# Rate limiting data
+.rate_limit_data
